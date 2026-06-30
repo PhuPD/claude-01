@@ -16,7 +16,9 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install requests pytz beautifulsoup4
+        run: |
+          pip install playwright pytz requests
+          playwright install chromium --with-deps
 
       - name: Fetch and report weather
         env:

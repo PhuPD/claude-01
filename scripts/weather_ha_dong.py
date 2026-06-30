@@ -3,65 +3,46 @@ import re
 import requests
 import pytz
 from datetime import datetime
+from playwright.sync_api import sync_playwright
 
 URL = "https://thoitiet.vn/ha-noi/ha-dong/theo-gio"
 TZ = "Asia/Ho_Chi_Minh"
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "vi-VN,vi;q=0.9",
-}
-
 
 def fetch_rows():
-    """Fetch hourly rows from thoitiet.vn. Returns list of (hour, condition, temp)."""
-    from bs4 import BeautifulSoup
+    """Dùng Playwright để lấy dữ liệu thời tiết theo giờ từ thoitiet.vn."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(URL, wait_until="networkidle", timeout=30000)
 
-    r = requests.get(URL, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
+        # Lấy toàn bộ text của trang sau khi JS render xong
+        content = page.inner_text("body")
+        browser.close()
 
+    return parse_rows(content)
+
+
+def parse_rows(text):
     rows = []
-
-    # thoitiet.vn renders hourly blocks — find all time+condition+temp groups
-    # Try common selectors; adjust if site structure changes
-    for item in soup.select(".hourly-item, .hour-item, [class*='hourly'], [class*='hour-item']"):
-        time_el = item.select_one("[class*='time'], [class*='hour']")
-        cond_el = item.select_one("[class*='desc'], [class*='condition'], [class*='weather'], img[alt]")
-        temp_el = item.select_one("[class*='temp'], [class*='temperature']")
-
-        hour = time_el.get_text(strip=True) if time_el else None
-        cond = (
-            cond_el.get("alt", "").strip() or cond_el.get_text(strip=True)
-            if cond_el else None
-        )
-        temp = temp_el.get_text(strip=True).replace("°", "").replace("C", "").strip() if temp_el else None
-
-        if hour and cond and temp:
-            rows.append((hour, cond, temp))
-
-    # Fallback: scan all text for HH:MM pattern near temperature
-    if not rows:
-        rows = _fallback_parse(soup)
-
-    return rows
-
-
-def _fallback_parse(soup):
-    """Last-resort: extract time/condition/temp from raw text blocks."""
-    rows = []
-    text = soup.get_text(separator="\n")
-    # Look for lines like "15:00\nNhiều mây\n32°C"
+    # Mỗi block giờ trên thoitiet.vn có dạng: "HH:MM\n<mô tả>\n<nhiệt độ>°C"
     pattern = re.compile(
-        r"(\d{1,2}:\d{2})\s*\n\s*([^\n]{3,40})\s*\n\s*(\d{1,2}(?:\.\d)?)\s*°?C?",
+        r"(\d{1,2}:\d{2})\s*\n\s*([^\n]{3,40}?)\s*\n\s*(\d{1,2}(?:\.\d)?)\s*°?C?(?:\s*/[^\n]*)?\s*\n",
         re.MULTILINE,
     )
     for m in pattern.finditer(text):
-        rows.append((m.group(1), m.group(2).strip(), m.group(3) + "°C"))
+        hour = m.group(1)
+        cond = m.group(2).strip()
+        temp = m.group(3)
+        if cond and not cond.isdigit():
+            rows.append((hour, cond, f"{temp}°C"))
+
+    # Fallback: tìm pattern đơn giản hơn nếu không match
+    if not rows:
+        pattern2 = re.compile(r"(\d{2}:\d{2}).*?([A-ZĐÂÊÔƠƯĂÁÀẢÃẠ][^\n]{2,30})\s*\n\s*(\d{2}(?:\.\d)?)", re.MULTILINE)
+        for m in pattern2.finditer(text):
+            rows.append((m.group(1), m.group(2).strip(), f"{m.group(3)}°C"))
+
     return rows
 
 
@@ -130,13 +111,15 @@ def send_telegram(summary):
 
 
 def main():
+    print(f"Đang lấy dữ liệu từ {URL} ...")
     rows = fetch_rows()
+
     if not rows:
-        print("Không lấy được dữ liệu từ thoitiet.vn")
+        print("Không parse được dữ liệu. In raw text để debug:")
         raise SystemExit(1)
 
     summary = build_summary(rows)
-    print(summary)
+    print(f"\n{summary}\n")
     for hour, cond, temp in rows:
         print(f"  {hour}  {cond:<25}  {temp}")
 
